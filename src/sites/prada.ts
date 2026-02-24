@@ -1,44 +1,81 @@
 import { SiteAdapter, ScrapingResult, Product, SizeGuide, SizeRow } from '../types';
 import { newPage } from '../browser';
 
+/** Prada requires Firefox (Chromium gets HTTP/2 errors due to anti-bot protection) */
+const BROWSER = 'firefox' as const;
+
+async function dismissCookieBanner(page: any): Promise<void> {
+  const selectors = [
+    'button:has-text("Accepter")',
+    'button:has-text("Accept")',
+    'button:has-text("Tout accepter")',
+    '#onetrust-accept-btn-handler',
+  ];
+  for (const sel of selectors) {
+    try {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 3000 })) {
+        await btn.click();
+        await page.waitForTimeout(1000);
+        return;
+      }
+    } catch {
+      continue;
+    }
+  }
+}
+
 async function crawlProducts(baseUrl: string): Promise<Product[]> {
-  const page = await newPage();
   const products: Product[] = [];
+  const seen = new Set<string>();
 
-  try {
-    // Prada product listing pages
-    const categories = [
-      { url: `${baseUrl}/fr/fr/men/shoes.html`, gender: 'Homme' },
-      { url: `${baseUrl}/fr/fr/women/shoes.html`, gender: 'Femme' },
-    ];
+  const categories = [
+    { url: `${baseUrl}/fr/fr/men/shoes.html`, gender: 'Homme' },
+    { url: `${baseUrl}/fr/fr/women/shoes.html`, gender: 'Femme' },
+  ];
 
-    for (const cat of categories) {
+  for (const cat of categories) {
+    const page = await newPage(BROWSER);
+    try {
       console.log(`   Crawling: ${cat.url}`);
-      await page.goto(cat.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.goto(cat.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      await dismissCookieBanner(page);
       await page.waitForTimeout(3000);
 
-      // Scroll to load more products
+      // Scroll to load products
       for (let i = 0; i < 3; i++) {
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(1500);
       }
 
       // Extract product links
       const links = await page.locator('a[href*="/fr/fr/p/"]').all();
-      const seen = new Set<string>();
 
       for (const link of links) {
         try {
           const href = await link.getAttribute('href');
-          const name = await link.textContent();
           if (!href || seen.has(href)) continue;
           seen.add(href);
 
+          // Get product name from aria-label or text
+          let name = await link.getAttribute('aria-label') || '';
+          if (!name) {
+            name = ((await link.textContent()) || '').trim().split('\n')[0].trim();
+          }
+          if (!name || name.length < 3) continue;
+
+          // Clean up: remove price, color info, and "FROM THE RUNWAY" prefix
+          name = name
+            .replace(/FROM THE RUNWAY\s*/i, '')
+            .replace(/\s*€\s*[\d.,]+.*$/i, '')
+            .replace(/\s*Disponible en.*$/i, '')
+            .trim();
+
           const fullUrl = href.startsWith('http') ? href : `${baseUrl}${href}`;
           products.push({
-            name: (name || '').trim().split('\n')[0].trim() || 'Unknown',
+            name: name.trim(),
             gender: cat.gender,
-            type: detectType((name || '').toLowerCase()),
+            type: detectType(name),
             url: fullUrl,
             sizeGuideId: null,
           });
@@ -46,166 +83,126 @@ async function crawlProducts(baseUrl: string): Promise<Product[]> {
           continue;
         }
       }
+    } catch (err) {
+      console.log(`  ⚠️ Error crawling ${cat.url}: ${(err as Error).message}`);
+    } finally {
+      await page.close();
     }
-  } catch (err) {
-    console.log(`  ⚠️ Error crawling Prada: ${(err as Error).message}`);
-  } finally {
-    await page.close();
   }
 
-  // Deduplicate by URL
-  const unique = new Map<string, Product>();
-  for (const p of products) {
-    if (!unique.has(p.url)) unique.set(p.url, p);
-  }
-
-  return Array.from(unique.values());
+  return products;
 }
 
-function detectType(text: string): string {
-  if (text.includes('basket') || text.includes('sneaker')) return 'Sneakers';
-  if (text.includes('mocassin') || text.includes('loafer')) return 'Loafers';
-  if (text.includes('boot') || text.includes('botte')) return 'Boots';
-  if (text.includes('sandal')) return 'Sandals';
-  if (text.includes('derby') || text.includes('richelieu')) return 'Derby';
+function detectType(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.includes('basket') || lower.includes('sneaker')) return 'Sneakers';
+  if (lower.includes('mocassin') || lower.includes('loafer')) return 'Loafers';
+  if (lower.includes('boot') || lower.includes('botte') || lower.includes('bottine')) return 'Boots';
+  if (lower.includes('sandal')) return 'Sandals';
+  if (lower.includes('derby') || lower.includes('richelieu')) return 'Derby';
+  if (lower.includes('escarpin') || lower.includes('pump')) return 'Pumps';
+  if (lower.includes('mule') || lower.includes('slide')) return 'Mules';
   return 'Shoes';
 }
 
-async function findSizeGuide(baseUrl: string): Promise<SizeGuide | null> {
-  const page = await newPage();
+async function findSizeGuide(baseUrl: string, sampleProductUrl: string): Promise<SizeGuide | null> {
+  const page = await newPage(BROWSER);
 
   try {
-    // Navigate to a product page and look for size guide
-    const productPage = `${baseUrl}/fr/fr/men/shoes.html`;
-    await page.goto(productPage, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await page.waitForTimeout(3000);
+    console.log(`   Opening product: ${sampleProductUrl}`);
+    await page.goto(sampleProductUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.waitForTimeout(5000);
+    await dismissCookieBanner(page);
+    await page.waitForTimeout(1000);
 
-    // Click first product
-    const firstProduct = page.locator('a[href*="/fr/fr/p/"]').first();
-    if (await firstProduct.isVisible({ timeout: 3000 })) {
-      await firstProduct.click();
-      await page.waitForTimeout(3000);
-    }
-
-    // Look for size guide trigger
-    const triggers = [
-      'text=/guide des tailles/i',
-      'text=/size guide/i',
-      'text=/guida alle taglie/i',
-      '[class*="size-guide"]',
-      '[class*="sizeGuide"]',
-      '[data-testid*="size-guide"]',
-      'button:has-text("taille")',
-      'a:has-text("guide")',
-    ];
-
-    for (const selector of triggers) {
-      try {
-        const el = page.locator(selector).first();
-        if (await el.isVisible({ timeout: 1000 })) {
-          await el.click();
-          await page.waitForTimeout(2000);
-
-          // Look for table
-          const table = page.locator('table').first();
-          if (await table.isVisible({ timeout: 2000 })) {
-            return await parseTable(table, page.url(), 'Prada');
+    // Click "Tableau des tailles" trigger
+    const sizeGuideBtn = page.locator('[data-element="size-guide-trigger"]').first();
+    if (await sizeGuideBtn.isVisible({ timeout: 3000 })) {
+      await sizeGuideBtn.click({ force: true });
+      await page.waitForTimeout(2000);
+    } else {
+      // Fallback selectors
+      const fallbacks = [
+        'button:has-text("Tableau des tailles")',
+        'button:has-text("Size guide")',
+        'text=/tableau des tailles/i',
+      ];
+      for (const sel of fallbacks) {
+        try {
+          const btn = page.locator(sel).first();
+          if (await btn.isVisible({ timeout: 1000 })) {
+            await btn.click({ force: true });
+            await page.waitForTimeout(2000);
+            break;
           }
-          break;
+        } catch {
+          continue;
         }
-      } catch {
-        continue;
       }
     }
 
-    // Fallback: try to find size data in page source
-    const content = await page.content();
-    const sizeGuide = parseSizeDataFromHtml(content);
-    if (sizeGuide) return sizeGuide;
+    // Parse the size table
+    const table = page.locator('table').first();
+    if (!(await table.isVisible({ timeout: 3000 }))) {
+      console.log('   ⚠️ No size table found');
+      return null;
+    }
 
-    return null;
+    const rows = await table.locator('tr').all();
+    const sizeRows: SizeRow[] = [];
+
+    for (const row of rows) {
+      const headers = await row.locator('th').allTextContents();
+      const cells = await row.locator('td').allTextContents();
+      const allCells = [...headers, ...cells].map((c) => c.trim());
+
+      if (allCells.length < 2) continue;
+
+      const label = allCells[0];
+      const values = allCells.slice(1).map((v) => v.replace(/\s*cm$/, '').trim()).filter((v) => v.length > 0);
+
+      if (values.length === 0) continue;
+
+      sizeRows.push({
+        label: getLongLabel(label),
+        shortLabel: getShortLabel(label),
+        values,
+      });
+    }
+
+    if (sizeRows.length === 0) return null;
+
+    return {
+      id: 1,
+      brand: 'Prada',
+      url: sampleProductUrl,
+      rows: sizeRows,
+    };
   } catch (err) {
-    console.log(`  ⚠️ Error finding Prada size guide: ${(err as Error).message}`);
+    console.log(`  ⚠️ Error: ${(err as Error).message}`);
     return null;
   } finally {
     await page.close();
   }
-}
-
-function parseSizeDataFromHtml(html: string): SizeGuide | null {
-  // Look for JSON-LD or embedded size data in the page source
-  const sizePatterns = [
-    /sizeGuide['":\s]*(\[[\s\S]*?\])/i,
-    /sizechart['":\s]*(\{[\s\S]*?\})/i,
-  ];
-
-  for (const pattern of sizePatterns) {
-    const match = html.match(pattern);
-    if (match) {
-      try {
-        const data = JSON.parse(match[1]);
-        console.log('   Found embedded size data in HTML');
-        return convertJsonToSizeGuide(data);
-      } catch {
-        continue;
-      }
-    }
-  }
-
-  return null;
-}
-
-function convertJsonToSizeGuide(data: any): SizeGuide | null {
-  // Generic converter for JSON size data
-  if (Array.isArray(data) && data.length > 0) {
-    const rows: SizeRow[] = [];
-    for (const entry of data) {
-      if (entry.label && entry.values) {
-        rows.push({
-          label: entry.label,
-          shortLabel: entry.shortLabel || entry.label,
-          values: entry.values.map(String),
-        });
-      }
-    }
-    if (rows.length > 0) {
-      return { id: 1, brand: 'Prada', url: '', rows };
-    }
-  }
-  return null;
-}
-
-async function parseTable(table: any, url: string, brand: string): Promise<SizeGuide | null> {
-  const rows = await table.locator('tr').all();
-  if (rows.length === 0) return null;
-
-  const sizeRows: SizeRow[] = [];
-
-  for (const row of rows) {
-    const cells = await row.locator('td, th').allTextContents();
-    if (cells.length < 2) continue;
-
-    const label = cells[0].trim();
-    const values = cells.slice(1).map((c: string) => c.trim()).filter((c: string) => c.length > 0);
-
-    if (values.length === 0) continue;
-
-    const shortLabel = getShortLabel(label);
-    sizeRows.push({ label, shortLabel, values });
-  }
-
-  if (sizeRows.length === 0) return null;
-
-  return { id: 1, brand, url, rows: sizeRows };
 }
 
 function getShortLabel(label: string): string {
   const lower = label.toLowerCase();
+  if (lower.includes('prada')) return 'Prada';
   if (lower.includes('europe') || lower === 'eu') return 'EU';
   if (lower.includes('royaume') || lower.includes('uk')) return 'UK';
   if (lower.includes('etats') || lower.includes('us')) return 'US';
-  if (lower.includes('longueur') || lower.includes('cm') || lower.includes('pied')) return 'cm';
+  if (lower.includes('pied') || lower.includes('cm') || lower.includes('longueur')) return 'cm';
+  return label;
+}
+
+function getLongLabel(label: string): string {
+  const lower = label.toLowerCase();
   if (lower.includes('prada')) return 'Prada';
+  if (lower.includes('europe') || lower === 'eu') return 'Europe';
+  if (lower.includes('royaume') || lower.includes('uk')) return 'Royaume-Uni';
+  if (lower.includes('etats') || lower.includes('us')) return 'Etats-Unis';
+  if (lower.includes('pied')) return 'Longueur pied';
   return label;
 }
 
@@ -215,20 +212,27 @@ export const pradaAdapter: SiteAdapter = {
   },
 
   async scrape(url: string): Promise<ScrapingResult> {
-    console.log('📦 Crawling Prada product pages...');
+    console.log('📦 Crawling Prada product pages (using Firefox)...');
     const products = await crawlProducts(url);
     console.log(`   Found ${products.length} products`);
 
     console.log('\n🔍 Looking for size guide...');
-    const sizeGuide = await findSizeGuide(url);
-    const sizeGuides: SizeGuide[] = [];
+    let sizeGuide: SizeGuide | null = null;
 
+    // Try to find size guide on first few product pages
+    const sampled = products.slice(0, 3);
+    for (const product of sampled) {
+      sizeGuide = await findSizeGuide(url, product.url);
+      if (sizeGuide) break;
+    }
+
+    const sizeGuides: SizeGuide[] = [];
     if (sizeGuide) {
       sizeGuides.push(sizeGuide);
       products.forEach((p) => (p.sizeGuideId = 1));
       console.log('   ✅ Found size guide!');
     } else {
-      console.log('   ⚠️ No size guide found on product pages');
+      console.log('   ⚠️ No size guide found');
     }
 
     return { products, sizeGuides };
