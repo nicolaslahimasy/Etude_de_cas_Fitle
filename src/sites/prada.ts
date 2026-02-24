@@ -121,7 +121,6 @@ async function findSizeGuide(baseUrl: string, sampleProductUrl: string): Promise
       await sizeGuideBtn.click({ force: true });
       await page.waitForTimeout(2000);
     } else {
-      // Fallback selectors
       const fallbacks = [
         'button:has-text("Tableau des tailles")',
         'button:has-text("Size guide")',
@@ -148,26 +147,55 @@ async function findSizeGuide(baseUrl: string, sampleProductUrl: string): Promise
       return null;
     }
 
-    const rows = await table.locator('tr').all();
+    // Read the default table (Prada + Europe + cm)
+    const defaultRows = await readTableRows(table);
+    if (defaultRows.length === 0) return null;
+
+    // The Prada size guide uses a <select> dropdown to switch conversion systems.
+    // Default shows: Prada, Europe, Pied (cm). We need to also get UK and US.
     const sizeRows: SizeRow[] = [];
 
-    for (const row of rows) {
-      const headers = await row.locator('th').allTextContents();
-      const cells = await row.locator('td').allTextContents();
-      const allCells = [...headers, ...cells].map((c) => c.trim());
+    // Row 0 is always the Prada sizes
+    sizeRows.push(defaultRows[0]);
 
-      if (allCells.length < 2) continue;
+    // Row 1 is Europe (default selection)
+    sizeRows.push(defaultRows[1]);
 
-      const label = allCells[0];
-      const values = allCells.slice(1).map((v) => v.replace(/\s*cm$/, '').trim()).filter((v) => v.length > 0);
+    // Switch through other conversion systems via the select dropdown
+    const select = page.locator('.size-component select, .size-table select, select').first();
+    const hasSelect = await select.isVisible({ timeout: 2000 }).catch(() => false);
 
-      if (values.length === 0) continue;
+    if (hasSelect) {
+      const options = await select.locator('option').allTextContents();
+      const systems = options.map((o) => o.trim()).filter((o) => o.length > 0);
+      console.log(`   Conversion systems: ${systems.join(', ')}`);
 
-      sizeRows.push({
-        label: getLongLabel(label),
-        shortLabel: getShortLabel(label),
-        values,
+      // We want Royaume-Uni and Etats-Unis (they may have accents)
+      const wanted = systems.filter((s) => {
+        const lower = s.toLowerCase();
+        return lower.includes('royaume') || lower.includes('tats-unis') || lower.includes('united');
       });
+
+      for (const system of wanted) {
+        try {
+          await select.selectOption({ label: system });
+          await page.waitForTimeout(1000);
+
+          const newRows = await readTableRows(table);
+          // The middle row (index 1) changes to the selected system
+          if (newRows.length >= 2) {
+            sizeRows.push(newRows[1]);
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    // Last row is always Pied (cm) - take from the default reading
+    const footRow = defaultRows[defaultRows.length - 1];
+    if (footRow && footRow.shortLabel !== sizeRows[sizeRows.length - 1]?.shortLabel) {
+      sizeRows.push(footRow);
     }
 
     if (sizeRows.length === 0) return null;
@@ -186,22 +214,52 @@ async function findSizeGuide(baseUrl: string, sampleProductUrl: string): Promise
   }
 }
 
+async function readTableRows(table: any): Promise<SizeRow[]> {
+  const rows = await table.locator('tr').all();
+  const sizeRows: SizeRow[] = [];
+
+  for (const row of rows) {
+    const headers = await row.locator('th').allTextContents();
+    const cells = await row.locator('td').allTextContents();
+    const allCells = [...headers, ...cells].map((c) => c.trim());
+
+    if (allCells.length < 2) continue;
+
+    const label = allCells[0];
+    const values = allCells.slice(1).map((v) => v.trim()).filter((v) => v.length > 0);
+
+    if (values.length === 0) continue;
+
+    sizeRows.push({
+      label: getLongLabel(label),
+      shortLabel: getShortLabel(label),
+      values,
+    });
+  }
+
+  return sizeRows;
+}
+
+function stripAccents(str: string): string {
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 function getShortLabel(label: string): string {
-  const lower = label.toLowerCase();
-  if (lower.includes('prada')) return 'Prada';
+  const lower = stripAccents(label).toLowerCase();
+  if (lower.includes('prada') || lower.includes('taille prada')) return 'Prada';
   if (lower.includes('europe') || lower === 'eu') return 'EU';
   if (lower.includes('royaume') || lower.includes('uk')) return 'UK';
-  if (lower.includes('etats') || lower.includes('us')) return 'US';
+  if (lower.includes('etats') || lower.includes('unis') || lower.includes('us')) return 'US';
   if (lower.includes('pied') || lower.includes('cm') || lower.includes('longueur')) return 'cm';
   return label;
 }
 
 function getLongLabel(label: string): string {
-  const lower = label.toLowerCase();
-  if (lower.includes('prada')) return 'Prada';
+  const lower = stripAccents(label).toLowerCase();
+  if (lower.includes('prada') || lower.includes('taille prada')) return 'Prada';
   if (lower.includes('europe') || lower === 'eu') return 'Europe';
   if (lower.includes('royaume') || lower.includes('uk')) return 'Royaume-Uni';
-  if (lower.includes('etats') || lower.includes('us')) return 'Etats-Unis';
+  if (lower.includes('etats') || lower.includes('unis') || lower.includes('us')) return 'Etats-Unis';
   if (lower.includes('pied')) return 'Longueur pied';
   return label;
 }

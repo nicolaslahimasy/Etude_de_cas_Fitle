@@ -48,7 +48,7 @@ export async function exportToExcel(result: ScrapingResult, outputPath: string):
 
     // Column headers: "Systemes metriques" | Taille 1 | Taille 2 | ...
     const maxValues = Math.max(...guide.rows.map((r) => r.values.length));
-    sheet2.getCell(currentRow, 2).value = 'Systemes metriques';
+    sheet2.getCell(currentRow, 2).value = 'Syst\u00e8mes m\u00e9triques';
     sheet2.getCell(currentRow, 2).font = { bold: true };
     for (let i = 0; i < maxValues; i++) {
       sheet2.getCell(currentRow, 3 + i).value = `Taille ${i + 1}`;
@@ -76,7 +76,11 @@ export async function exportToExcel(result: ScrapingResult, outputPath: string):
     for (let r = 1; r < guide.rows.length; r++) {
       const row = guide.rows[r];
       sheet2.getCell(currentRow, 1).value = row.label;
-      sheet2.getCell(currentRow, 2).value = row.shortLabel;
+
+      // Don't put shortLabel in column B for the foot length row (matches template)
+      if (row.shortLabel !== 'cm') {
+        sheet2.getCell(currentRow, 2).value = row.shortLabel;
+      }
 
       for (let i = 0; i < row.values.length; i++) {
         sheet2.getCell(currentRow, 3 + i).value = parseNumericValue(row.values[i]);
