@@ -98,7 +98,7 @@ export async function exportToExcel(result: ScrapingResult, outputPath: string):
   // Save
   const outputDir = path.dirname(outputPath);
   await workbook.xlsx.writeFile(outputPath);
-  console.log(`\n💾 Excel file saved: ${outputPath}`);
+  console.log(`\nExcel file saved: ${outputPath}`);
 }
 
 function parseNumericValue(val: string): string | number {

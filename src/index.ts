@@ -26,24 +26,24 @@ async function main() {
   // Normalize URL
   const normalizedUrl = url.replace(/\/$/, '');
 
-  console.log(`\n🔍 Fitle Size Guide Scraper`);
-  console.log(`📎 Target: ${normalizedUrl}\n`);
+  console.log(`\nFitle Size Guide Scraper`);
+  console.log(`Target: ${normalizedUrl}\n`);
 
   // Find matching adapter
   const adapter = adapters.find((a) => a.matches(normalizedUrl));
   if (!adapter) {
-    console.error('❌ No adapter found for this URL');
+    console.error('Error: No adapter found for this URL');
     process.exit(1);
   }
 
   const adapterName = adapter === genericAdapter ? 'Generic' : normalizedUrl.replace(/https?:\/\/(www\.)?/, '').split('/')[0];
-  console.log(`🔧 Using adapter: ${adapterName}\n`);
+  console.log(`Using adapter: ${adapterName}\n`);
 
   try {
     // Run scraping
     const result = await adapter.scrape(normalizedUrl);
 
-    console.log(`\n📊 Results:`);
+    console.log(`\nResults:`);
     console.log(`   Products found: ${result.products.length}`);
     console.log(`   Size guides found: ${result.sizeGuides.length}`);
 
@@ -60,9 +60,9 @@ async function main() {
 
     await exportToExcel(result, outputFile);
 
-    console.log(`\n✅ Done! Results saved to ${outputFile}`);
+    console.log(`\nDone! Results saved to ${outputFile}`);
   } catch (err) {
-    console.error(`\n❌ Error: ${(err as Error).message}`);
+    console.error(`\nError: ${(err as Error).message}`);
     process.exit(1);
   } finally {
     await closeBrowser();

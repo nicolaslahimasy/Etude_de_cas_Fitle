@@ -177,7 +177,7 @@ export const labottegardiane: SiteAdapter = {
   },
 
   async scrape(url: string): Promise<ScrapingResult> {
-    console.log('📦 Fetching products from Shopify API...');
+    console.log('Fetching products from Shopify API...');
     const shopifyProducts = await fetchAllProducts(url);
     console.log(`   Found ${shopifyProducts.length} products`);
 
@@ -190,16 +190,16 @@ export const labottegardiane: SiteAdapter = {
     }));
 
     // Try to find size guide
-    console.log('\n🔍 Looking for size guide...');
+    console.log('\nLooking for size guide...');
     const sizeGuide = await findSizeGuideOnPages(url, products.map((p) => p.url));
     const sizeGuides: SizeGuide[] = [];
 
     if (sizeGuide) {
       sizeGuides.push(sizeGuide);
       products.forEach((p) => (p.sizeGuideId = 1));
-      console.log('   ✅ Found size guide!');
+      console.log('   Found size guide!');
     } else {
-      console.log('   ⚠️ No size guide found on this site');
+      console.log('   No size guide found on this site');
     }
 
     return { products, sizeGuides };

@@ -221,7 +221,7 @@ async function crawlProducts(baseUrl: string): Promise<Product[]> {
       }
     }
   } catch (err) {
-    console.log(`  ⚠️ Error crawling: ${(err as Error).message}`);
+    console.log(`  Error crawling: ${(err as Error).message}`);
   } finally {
     await page.close();
   }
@@ -429,20 +429,20 @@ export const genericAdapter: SiteAdapter = {
   },
 
   async scrape(url: string): Promise<ScrapingResult> {
-    console.log('📦 Crawling products (generic mode)...');
+    console.log('Crawling products (generic mode)...');
     const products = await crawlProducts(url);
     console.log(`   Found ${products.length} products`);
 
-    console.log('\n🔍 Looking for size guide...');
+    console.log('\nLooking for size guide...');
     const sizeGuide = await findSizeGuide(url, products.map((p) => p.url));
     const sizeGuides: SizeGuide[] = [];
 
     if (sizeGuide) {
       sizeGuides.push(sizeGuide);
       products.forEach((p) => (p.sizeGuideId = 1));
-      console.log('   ✅ Found size guide!');
+      console.log('   Found size guide!');
     } else {
-      console.log('   ⚠️ No size guide found');
+      console.log('   No size guide found');
     }
 
     return { products, sizeGuides };

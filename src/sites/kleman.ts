@@ -112,7 +112,7 @@ async function findSizeGuides(productUrl: string): Promise<SizeGuide[]> {
       }
     }
   } catch (err) {
-    console.log(`  ⚠️ Error: ${(err as Error).message}`);
+    console.log(`  Error: ${(err as Error).message}`);
   } finally {
     await page.close();
   }
@@ -153,7 +153,7 @@ export const klemanAdapter: SiteAdapter = {
   },
 
   async scrape(url: string): Promise<ScrapingResult> {
-    console.log('📦 Fetching products from Shopify API...');
+    console.log('Fetching products from Shopify API...');
     const shopifyProducts = await fetchAllProducts(url);
     console.log(`   Found ${shopifyProducts.length} products`);
 
@@ -166,7 +166,7 @@ export const klemanAdapter: SiteAdapter = {
     }));
 
     // Find size guides on a sample product page
-    console.log('\n🔍 Looking for size guides on a product page...');
+    console.log('\nLooking for size guides on a product page...');
     const sampleUrl = products[0]?.url;
     let sizeGuides: SizeGuide[] = [];
 
@@ -175,7 +175,7 @@ export const klemanAdapter: SiteAdapter = {
       sizeGuides = await findSizeGuides(sampleUrl);
 
       if (sizeGuides.length > 0) {
-        console.log(`   ✅ Found ${sizeGuides.length} size guide(s)!`);
+        console.log(`   Found ${sizeGuides.length} size guide(s)!`);
         // Assign guide IDs to products based on gender
         for (const product of products) {
           const matchingGuide = sizeGuides.find((g) => {

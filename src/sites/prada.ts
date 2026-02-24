@@ -84,7 +84,7 @@ async function crawlProducts(baseUrl: string): Promise<Product[]> {
         }
       }
     } catch (err) {
-      console.log(`  ⚠️ Error crawling ${cat.url}: ${(err as Error).message}`);
+      console.log(`  Error crawling ${cat.url}: ${(err as Error).message}`);
     } finally {
       await page.close();
     }
@@ -144,7 +144,7 @@ async function findSizeGuide(baseUrl: string, sampleProductUrl: string): Promise
     // Parse the size table
     const table = page.locator('table').first();
     if (!(await table.isVisible({ timeout: 3000 }))) {
-      console.log('   ⚠️ No size table found');
+      console.log('   No size table found');
       return null;
     }
 
@@ -179,7 +179,7 @@ async function findSizeGuide(baseUrl: string, sampleProductUrl: string): Promise
       rows: sizeRows,
     };
   } catch (err) {
-    console.log(`  ⚠️ Error: ${(err as Error).message}`);
+    console.log(`  Error: ${(err as Error).message}`);
     return null;
   } finally {
     await page.close();
@@ -212,11 +212,11 @@ export const pradaAdapter: SiteAdapter = {
   },
 
   async scrape(url: string): Promise<ScrapingResult> {
-    console.log('📦 Crawling Prada product pages (using Firefox)...');
+    console.log('Crawling Prada product pages (using Firefox)...');
     const products = await crawlProducts(url);
     console.log(`   Found ${products.length} products`);
 
-    console.log('\n🔍 Looking for size guide...');
+    console.log('\nLooking for size guide...');
     let sizeGuide: SizeGuide | null = null;
 
     // Try to find size guide on first few product pages
@@ -230,9 +230,9 @@ export const pradaAdapter: SiteAdapter = {
     if (sizeGuide) {
       sizeGuides.push(sizeGuide);
       products.forEach((p) => (p.sizeGuideId = 1));
-      console.log('   ✅ Found size guide!');
+      console.log('   Found size guide!');
     } else {
-      console.log('   ⚠️ No size guide found');
+      console.log('   No size guide found');
     }
 
     return { products, sizeGuides };
