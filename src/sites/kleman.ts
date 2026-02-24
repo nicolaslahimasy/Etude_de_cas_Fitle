@@ -1,5 +1,5 @@
-import { SiteAdapter, ScrapingResult, Product, SizeGuide } from '../types';
-import { newPage, closeBrowser } from '../browser';
+import { SiteAdapter, ScrapingResult, Product, SizeGuide, SizeRow } from '../types';
+import { newPage } from '../browser';
 
 interface ShopifyProduct {
   id: number;
@@ -45,106 +45,106 @@ function detectType(product: ShopifyProduct): string {
   return 'Shoes';
 }
 
-async function findSizeGuideOnPage(productUrl: string): Promise<SizeGuide | null> {
+async function findSizeGuides(productUrl: string): Promise<SizeGuide[]> {
   const page = await newPage();
+  const guides: SizeGuide[] = [];
 
   try {
-    await page.goto(productUrl, { waitUntil: 'networkidle', timeout: 15000 });
+    await page.goto(productUrl, { waitUntil: 'networkidle', timeout: 20000 });
 
-    // Look for size guide triggers (buttons, links, accordions)
-    const sizeGuideSelectors = [
-      'text=/guide des tailles/i',
-      'text=/size guide/i',
-      'text=/guide de taille/i',
-      'text=/tableau des tailles/i',
-      '[class*="size-guide"]',
-      '[class*="size_guide"]',
-      '[class*="sizeguide"]',
-      '[data-action*="size-guide"]',
-      '[href*="size-guide"]',
-      '[href*="guide-taille"]',
-    ];
+    // The size guide data is already in the DOM (hidden panels).
+    // Kleman uses div-based tables with class "size-guide-table",
+    // NOT HTML <table> elements.
 
-    for (const selector of sizeGuideSelectors) {
-      try {
-        const el = page.locator(selector).first();
-        if (await el.isVisible({ timeout: 1000 })) {
-          await el.click();
-          await page.waitForTimeout(1500);
-          break;
+    // Get titles to know which guide is which (Homme/Femme)
+    const titles = await page.locator('.panel-size-guide__table-title').allTextContents();
+    const containers = await page.locator('.size-guide-table').all();
+
+    console.log(`   Found ${containers.length} size guide tables: ${titles.join(', ')}`);
+
+    for (let i = 0; i < containers.length; i++) {
+      const container = containers[i];
+      const title = titles[i] || `Guide ${i + 1}`;
+
+      // Get the header labels (EU, UK, US, CM, Pouces)
+      const headerItems = await container.locator('.size-guide-table__content__item').allTextContents();
+      const cleaned = headerItems.map((t) => t.trim()).filter((t) => t.length > 0);
+
+      if (cleaned.length === 0) continue;
+
+      // First N items are the column headers, then the rest is data in row-major order
+      // Headers: EU, UK, US, CM, Pouces (5 columns)
+      const headers = findHeaders(cleaned);
+      const numCols = headers.length;
+
+      if (numCols === 0) continue;
+
+      // Find where data starts (after the header row)
+      const headerEndIdx = numCols;
+      const dataItems = cleaned.slice(headerEndIdx);
+
+      // Group data into rows
+      const numRows = Math.floor(dataItems.length / numCols);
+      const sizeRows: SizeRow[] = [];
+
+      for (let h = 0; h < numCols; h++) {
+        const label = headers[h];
+        const values: string[] = [];
+        for (let r = 0; r < numRows; r++) {
+          values.push(dataItems[r * numCols + h]);
         }
-      } catch {
-        continue;
+        sizeRows.push({
+          label: getLongLabel(label),
+          shortLabel: label,
+          values,
+        });
+      }
+
+      if (sizeRows.length > 0) {
+        const guideId = i + 1;
+        const genderSuffix = title.toLowerCase().includes('femme') ? ' (Femme)' : title.toLowerCase().includes('homme') ? ' (Homme)' : '';
+        guides.push({
+          id: guideId,
+          brand: `Kleman${genderSuffix}`,
+          url: productUrl,
+          rows: sizeRows,
+        });
       }
     }
-
-    // Try to find any table with size data
-    const tables = await page.locator('table').all();
-    for (const table of tables) {
-      const text = await table.textContent();
-      if (!text) continue;
-
-      const lowerText = text.toLowerCase();
-      if (lowerText.includes('eu') || lowerText.includes('uk') || lowerText.includes('us') || lowerText.includes('cm') || lowerText.includes('pointure')) {
-        return await parseHtmlTable(table, productUrl);
-      }
-    }
-
-    // Also check for size guide content in divs/sections
-    const guideContainers = await page.locator('[class*="size"], [class*="taille"], [id*="size"], [id*="taille"]').all();
-    for (const container of guideContainers) {
-      const innerTable = container.locator('table').first();
-      if (await innerTable.count() > 0) {
-        return await parseHtmlTable(innerTable, productUrl);
-      }
-    }
-
-    return null;
   } catch (err) {
-    console.log(`  ⚠️ Could not load ${productUrl}: ${(err as Error).message}`);
-    return null;
+    console.log(`  ⚠️ Error: ${(err as Error).message}`);
   } finally {
     await page.close();
   }
+
+  return guides;
 }
 
-async function parseHtmlTable(table: any, url: string): Promise<SizeGuide | null> {
-  const rows = await table.locator('tr').all();
-  if (rows.length === 0) return null;
+function findHeaders(items: string[]): string[] {
+  // Known header labels
+  const knownHeaders = ['EU', 'UK', 'US', 'CM', 'Pouces'];
+  const headers: string[] = [];
 
-  const sizeRows: { label: string; shortLabel: string; values: string[] }[] = [];
-
-  for (const row of rows) {
-    const cells = await row.locator('td, th').allTextContents();
-    if (cells.length < 2) continue;
-
-    const label = cells[0].trim();
-    const values = cells.slice(1).map((c: string) => c.trim()).filter((c: string) => c.length > 0);
-
-    if (values.length === 0) continue;
-
-    const shortLabel = getShortLabel(label);
-    sizeRows.push({ label, shortLabel, values });
+  for (const item of items) {
+    if (knownHeaders.includes(item)) {
+      headers.push(item);
+    } else {
+      break; // Data starts
+    }
   }
 
-  if (sizeRows.length === 0) return null;
-
-  return {
-    id: 1,
-    brand: 'Kleman',
-    url,
-    rows: sizeRows,
-  };
+  return headers;
 }
 
-function getShortLabel(label: string): string {
-  const lower = label.toLowerCase();
-  if (lower.includes('europe') || lower === 'eu') return 'EU';
-  if (lower.includes('royaume') || lower.includes('uk')) return 'UK';
-  if (lower.includes('etats') || lower.includes('us') || lower.includes('usa')) return 'US';
-  if (lower.includes('longueur') || lower.includes('cm') || lower.includes('pied')) return 'cm';
-  if (lower.includes('japon') || lower.includes('jp')) return 'JP';
-  return label;
+function getLongLabel(short: string): string {
+  switch (short) {
+    case 'EU': return 'Europe';
+    case 'UK': return 'Royaume-Uni';
+    case 'US': return 'Etats-Unis';
+    case 'CM': return 'Longueur pied (cm)';
+    case 'Pouces': return 'Longueur pied (pouces)';
+    default: return short;
+  }
 }
 
 export const klemanAdapter: SiteAdapter = {
@@ -165,24 +165,28 @@ export const klemanAdapter: SiteAdapter = {
       sizeGuideId: null,
     }));
 
-    // Try to find size guide on a sample product page
-    console.log('\n🔍 Looking for size guide on product pages...');
-    const sampleUrls = products.slice(0, 3).map((p) => p.url);
-    let sizeGuide: SizeGuide | null = null;
+    // Find size guides on a sample product page
+    console.log('\n🔍 Looking for size guides on a product page...');
+    const sampleUrl = products[0]?.url;
+    let sizeGuides: SizeGuide[] = [];
 
-    for (const sampleUrl of sampleUrls) {
+    if (sampleUrl) {
       console.log(`   Checking: ${sampleUrl}`);
-      sizeGuide = await findSizeGuideOnPage(sampleUrl);
-      if (sizeGuide) {
-        console.log(`   ✅ Found size guide!`);
-        break;
-      }
-    }
+      sizeGuides = await findSizeGuides(sampleUrl);
 
-    const sizeGuides: SizeGuide[] = [];
-    if (sizeGuide) {
-      sizeGuides.push(sizeGuide);
-      products.forEach((p) => (p.sizeGuideId = 1));
+      if (sizeGuides.length > 0) {
+        console.log(`   ✅ Found ${sizeGuides.length} size guide(s)!`);
+        // Assign guide IDs to products based on gender
+        for (const product of products) {
+          const matchingGuide = sizeGuides.find((g) => {
+            if (g.brand.includes('Homme') && product.gender === 'Homme') return true;
+            if (g.brand.includes('Femme') && product.gender === 'Femme') return true;
+            if (!g.brand.includes('Homme') && !g.brand.includes('Femme')) return true;
+            return false;
+          });
+          product.sizeGuideId = matchingGuide?.id ?? sizeGuides[0].id;
+        }
+      }
     }
 
     return { products, sizeGuides };
