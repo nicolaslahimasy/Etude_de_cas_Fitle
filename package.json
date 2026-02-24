@@ -1,0 +1,19 @@
+{
+  "name": "fitle-size-guide-scraper",
+  "version": "1.0.0",
+  "description": "Scrapes and synthesizes size guides from e-commerce websites",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "ts-node src/index.ts",
+    "scrape": "ts-node src/index.ts"
+  },
+  "author": "Nicolas",
+  "license": "ISC",
+  "dependencies": {
+    "@types/node": "^25.3.0",
+    "exceljs": "^4.4.0",
+    "playwright": "^1.58.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

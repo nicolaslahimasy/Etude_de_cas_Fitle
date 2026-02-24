@@ -1,0 +1,6 @@
+node_modules/
+dist/
+output/
+*.xlsx
+!Etudes de cas.xlsx
+.env
