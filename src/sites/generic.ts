@@ -6,6 +6,22 @@ import { newPage } from '../browser';
  * Uses heuristics to find products and size guides.
  */
 
+const SKIP_NAMES = [
+  'decouvrir', 'découvrir', 'voir', 'voir tout', 'menu', 'accueil', 'home', 'shop',
+  'boutique', 'collection', 'bateaux', 'bottines', 'derbies', 'mocassins',
+  'richelieus', 'sandales', 'sneakers', 'bottes', 'chaussures', 'accessoires',
+  'homme', 'femme', 'enfant', 'nouveautes', 'nouveautés', 'soldes', 'promo',
+  'smart casual', 'grandes pointures', 'sportswear', 'outdoor', 'style',
+  'dernières chances', 'dernieres chances',
+];
+
+function isValidProductName(name: string): boolean {
+  if (!name || name.length < 3) return false;
+  const lower = name.toLowerCase().trim();
+  if (SKIP_NAMES.includes(lower)) return false;
+  return true;
+}
+
 async function crawlProducts(baseUrl: string): Promise<Product[]> {
   const page = await newPage();
   const products: Product[] = [];
@@ -22,7 +38,7 @@ async function crawlProducts(baseUrl: string): Promise<Product[]> {
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     await page.waitForTimeout(2000);
 
-    // Common product link patterns
+    // Common product link patterns (ordered: specific URL patterns first, then CSS class patterns)
     const productSelectors = [
       'a[href*="/products/"]',
       'a[href*="/product/"]',
@@ -30,7 +46,13 @@ async function crawlProducts(baseUrl: string): Promise<Product[]> {
       'a[href*="/produit/"]',
       '.product-card a',
       '.product-item a',
+      '.product-tile a',
+      '.product-link',
       '[data-product] a',
+      '[data-product-id] a',
+      'article a',
+      '.collection-product a',
+      '.grid-item a',
     ];
 
     const seen = new Set<string>();
@@ -60,8 +82,8 @@ async function crawlProducts(baseUrl: string): Promise<Product[]> {
       if (products.length > 0) break;
     }
 
-    // If still no products, try navigation links to find category pages
-    if (products.length === 0) {
+    // If few products found, try navigation links to find category pages
+    if (products.length < 20) {
       const navLinks = await page.locator('nav a, .menu a, header a').all();
       const categoryKeywords = ['chaussure', 'shoe', 'homme', 'femme', 'collection', 'shop', 'boutique'];
 
@@ -78,6 +100,9 @@ async function crawlProducts(baseUrl: string): Promise<Product[]> {
         await page.goto(catUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
         await page.waitForTimeout(2000);
 
+        const countBefore = products.length;
+
+        // Try CSS selectors first
         for (const selector of productSelectors) {
           const links = await page.locator(selector).all();
           for (const link of links) {
@@ -91,7 +116,7 @@ async function crawlProducts(baseUrl: string): Promise<Product[]> {
               products.push({
                 name: (linkText || '').trim().split('\n')[0].trim() || 'Unknown',
                 gender: detectGenderFromUrl(catUrl),
-                type: 'Shoes',
+                type: detectTypeFromUrl(catUrl),
                 url: fullUrl,
                 sizeGuideId: null,
               });
@@ -101,7 +126,98 @@ async function crawlProducts(baseUrl: string): Promise<Product[]> {
           }
         }
 
-        if (products.length > 10) break;
+        // Heuristic: in category pages, links with images are likely products
+        if (products.length === countBefore) {
+          const allLinks = await page.locator('a[href]').all();
+          for (const link of allLinks) {
+            try {
+              const linkHref = await link.getAttribute('href');
+              if (!linkHref || seen.has(linkHref)) continue;
+              if (linkHref.includes('#') || linkHref.includes('mailto:') || linkHref.includes('tel:')) continue;
+              if (linkHref.includes('login') || linkHref.includes('cart') || linkHref.includes('account')) continue;
+
+              const fullUrl = linkHref.startsWith('http') ? linkHref : `${baseUrl}${linkHref}`;
+              const urlPath = new URL(fullUrl).pathname;
+              const pathParts = urlPath.split('/').filter(Boolean);
+
+              // In a category page, a link with image and 2+ path segments is likely a product
+              if (pathParts.length < 2) continue;
+
+              const hasImage = (await link.locator('img').count()) > 0;
+              if (!hasImage) continue;
+
+              seen.add(linkHref);
+              let linkText = ((await link.textContent()) || '').trim().split('\n')[0].trim();
+              // Clean up price and extra text
+              linkText = linkText.replace(/\s*(Nouveauté|Dernière chance|Exclu Web)\s*/gi, '').trim();
+              linkText = linkText.replace(/\s*\d+\s*Autres?\s*coloris?\s*/gi, '').trim();
+              linkText = linkText.replace(/\s*[\d.,]+\s*€.*$/i, '').trim();
+              const imgAlt = await link.locator('img').first().getAttribute('alt').catch(() => '') || '';
+              const name = linkText || imgAlt || '';
+
+              if (!isValidProductName(name)) continue;
+
+              products.push({
+                name,
+                gender: detectGenderFromUrl(catUrl),
+                type: detectTypeFromUrl(catUrl),
+                url: fullUrl,
+                sizeGuideId: null,
+              });
+            } catch {
+              continue;
+            }
+          }
+        }
+
+        if (products.length > 50) break;
+      }
+    }
+
+    // Last resort: find links that look like product pages (contain .html or have product-like paths)
+    if (products.length === 0) {
+      console.log('   Trying heuristic product detection...');
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.waitForTimeout(2000);
+
+      const allLinks = await page.locator('a[href]').all();
+      for (const link of allLinks) {
+        try {
+          const href = await link.getAttribute('href');
+          if (!href || seen.has(href)) continue;
+
+          // Skip nav/footer/utility/blog links
+          if (href.includes('#') || href.includes('mailto:') || href.includes('tel:')) continue;
+          if (href.includes('login') || href.includes('cart') || href.includes('account')) continue;
+          if (href.includes('contact') || href.includes('faq') || href.includes('legal')) continue;
+          if (href.includes('journal') || href.includes('blog') || href.includes('article')) continue;
+
+          // Heuristic: product links usually end with .html or have 3+ path segments
+          const fullUrl = href.startsWith('http') ? href : `${baseUrl}${href}`;
+          const pathParts = new URL(fullUrl).pathname.split('/').filter(Boolean);
+          const hasProductPattern = href.endsWith('.html') && pathParts.length >= 2;
+
+          if (!hasProductPattern) continue;
+
+          // Check if the link has an image nearby (product cards usually have images)
+          const parent = link.locator('..');
+          const hasImage = (await parent.locator('img').count()) > 0;
+          if (!hasImage) continue;
+
+          seen.add(href);
+          const text = ((await link.textContent()) || '').trim().split('\n')[0].trim();
+          const imgAlt = await parent.locator('img').first().getAttribute('alt').catch(() => '');
+
+          products.push({
+            name: text || imgAlt || 'Unknown',
+            gender: detectGenderFromUrl(fullUrl),
+            type: 'Shoes',
+            url: fullUrl,
+            sizeGuideId: null,
+          });
+        } catch {
+          continue;
+        }
       }
     }
   } catch (err) {
@@ -141,6 +257,17 @@ function detectGenderFromTags(tags: string[], title: string): string {
   return 'Unisex';
 }
 
+function detectTypeFromUrl(url: string): string {
+  const lower = url.toLowerCase();
+  if (lower.includes('derby') || lower.includes('derbies') || lower.includes('richelieu')) return 'Derby';
+  if (lower.includes('mocassin') || lower.includes('loafer')) return 'Loafers';
+  if (lower.includes('bottine') || lower.includes('boot') || lower.includes('botte')) return 'Boots';
+  if (lower.includes('sandal')) return 'Sandals';
+  if (lower.includes('sneaker') || lower.includes('basket')) return 'Sneakers';
+  if (lower.includes('bateau')) return 'Boat Shoes';
+  return 'Shoes';
+}
+
 function detectGenderFromUrl(url: string): string {
   const lower = url.toLowerCase();
   if (lower.includes('femme') || lower.includes('women') || lower.includes('woman')) return 'Femme';
@@ -155,9 +282,13 @@ async function findSizeGuide(baseUrl: string, productUrls: string[]): Promise<Si
     '/pages/size-guide',
     '/size-guide',
     '/guide-des-tailles',
+    '/guide-tailles',
+    '/guide-des-pointures',
     '/pages/guide-taille',
     '/pages/sizing',
     '/sizing-guide',
+    '/size-chart',
+    '/taille',
   ];
 
   for (const path of commonPaths) {
