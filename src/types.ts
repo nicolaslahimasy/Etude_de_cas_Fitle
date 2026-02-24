@@ -7,8 +7,11 @@ export interface Product {
 }
 
 export interface SizeRow {
+  /** Full label e.g. "Europe", "Royaume-Uni", "Longueur pied" */
   label: string;
+  /** Short label e.g. "EU", "UK", "US" */
   shortLabel: string;
+  /** Size values for each column */
   values: string[];
 }
 
@@ -22,4 +25,11 @@ export interface SizeGuide {
 export interface ScrapingResult {
   products: Product[];
   sizeGuides: SizeGuide[];
+}
+
+export interface SiteAdapter {
+  /** Detect if this adapter handles the given URL */
+  matches(url: string): boolean;
+  /** Scrape products and size guides from the site */
+  scrape(url: string): Promise<ScrapingResult>;
 }
