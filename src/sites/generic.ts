@@ -390,14 +390,36 @@ async function parseTable(table: any, url: string): Promise<SizeGuide | null> {
   const rows = await table.locator('tr').all();
   if (rows.length === 0) return null;
 
-  const sizeRows: SizeRow[] = [];
-
+  // Read all rows from the table
+  const rawRows: string[][] = [];
   for (const row of rows) {
     const cells = await row.locator('td, th').allTextContents();
-    if (cells.length < 2) continue;
+    const cleaned = cells.map((c: string) => c.trim()).filter((c: string) => c.length > 0);
+    if (cleaned.length >= 2) {
+      rawRows.push(cleaned);
+    }
+  }
 
-    const label = cells[0].trim();
-    const values = cells.slice(1).map((c: string) => c.trim()).filter((c: string) => c.length > 0);
+  if (rawRows.length === 0) return null;
+
+  const hostname = new URL(url).hostname.replace('www.', '').split('.')[0];
+  const brand = hostname.charAt(0).toUpperCase() + hostname.slice(1);
+
+  // Detect if the table is vertical (many rows with few columns, labels look like size numbers).
+  // Vertical: each row = one size (e.g., "35 | 22 cm"), needs transposing.
+  // Horizontal: each row = one system (e.g., "EU | 38 | 39 | 40"), already correct.
+  const isVertical = detectVerticalTable(rawRows);
+
+  if (isVertical) {
+    console.log('   Detected vertical size table, transposing...');
+    return transposeTable(rawRows, brand, url);
+  }
+
+  // Horizontal format: each row is a system
+  const sizeRows: SizeRow[] = [];
+  for (const cells of rawRows) {
+    const label = cells[0];
+    const values = cells.slice(1);
     if (values.length === 0) continue;
 
     const shortLabel = getShortLabel(label);
@@ -405,12 +427,133 @@ async function parseTable(table: any, url: string): Promise<SizeGuide | null> {
   }
 
   if (sizeRows.length === 0) return null;
+  return { id: 1, brand, url, rows: sizeRows };
+}
 
-  // Try to detect brand from URL
-  const hostname = new URL(url).hostname.replace('www.', '').split('.')[0];
-  const brand = hostname.charAt(0).toUpperCase() + hostname.slice(1);
+function detectVerticalTable(rawRows: string[][]): boolean {
+  if (rawRows.length < 4) return false;
+
+  // Vertical tables have few columns (2-3) and many rows
+  const avgCols = rawRows.reduce((sum, r) => sum + r.length, 0) / rawRows.length;
+  if (avgCols > 4) return false; // Horizontal tables have many columns
+
+  // Check if most labels in column 0 (after the header row) look like size numbers
+  let numericLabels = 0;
+  for (let i = 1; i < rawRows.length; i++) {
+    const label = rawRows[i][0].replace(/[.,]/g, '');
+    if (/^\d+$/.test(label)) numericLabels++;
+  }
+
+  return numericLabels >= rawRows.length * 0.6;
+}
+
+function transposeTable(rawRows: string[][], brand: string, url: string): SizeGuide | null {
+  // First row contains column headers (system labels)
+  const headers = rawRows[0];
+  const numCols = headers.length;
+
+  // Create one SizeRow per column, with values from all data rows
+  const sizeRows: SizeRow[] = [];
+
+  for (let col = 0; col < numCols; col++) {
+    const label = headers[col];
+    const values: string[] = [];
+
+    for (let row = 1; row < rawRows.length; row++) {
+      if (col < rawRows[row].length) {
+        values.push(rawRows[row][col]);
+      }
+    }
+
+    if (values.length === 0) continue;
+
+    sizeRows.push({
+      label: label,
+      shortLabel: getShortLabel(label),
+      values,
+    });
+  }
+
+  if (sizeRows.length === 0) return null;
+
+  // The first column is typically the brand's own sizing (e.g., "35, 36, 37...")
+  // Rename it to the brand name
+  if (sizeRows.length > 0) {
+    sizeRows[0].label = brand;
+    sizeRows[0].shortLabel = brand;
+  }
 
   return { id: 1, brand, url, rows: sizeRows };
+}
+
+// Standard EU shoe size conversion tables
+const EU_UK_MAP: Record<string, string> = {
+  '35': '2.5', '35.5': '3', '36': '3.5', '36.5': '4',
+  '37': '4', '37.5': '4.5', '38': '5', '38.5': '5.5',
+  '39': '5.5', '39.5': '6', '40': '6.5', '40.5': '7',
+  '41': '7.5', '41.5': '8', '42': '8', '42.5': '8.5',
+  '43': '9', '43.5': '9.5', '44': '9.5', '44.5': '10',
+  '45': '10.5', '45.5': '11', '46': '11.5', '46.5': '12',
+  '47': '12', '48': '13',
+};
+
+const EU_US_MAP: Record<string, string> = {
+  '35': '5', '35.5': '5.5', '36': '6', '36.5': '6.5',
+  '37': '6.5', '37.5': '7', '38': '7.5', '38.5': '8',
+  '39': '8', '39.5': '8.5', '40': '9', '40.5': '9.5',
+  '41': '9.5', '41.5': '10', '42': '10', '42.5': '10.5',
+  '43': '11', '43.5': '11.5', '44': '11.5', '44.5': '12',
+  '45': '12', '45.5': '12.5', '46': '13', '46.5': '13.5',
+  '47': '13.5', '48': '14',
+};
+
+/** Add EU/UK/US rows when a size guide only has brand sizes + cm */
+function enrichWithConversions(guide: SizeGuide): SizeGuide {
+  const shortLabels = guide.rows.map((r) => r.shortLabel);
+  const hasEU = shortLabels.includes('EU');
+  const hasUK = shortLabels.includes('UK');
+  const hasUS = shortLabels.includes('US');
+
+  if (hasEU && hasUK && hasUS) return guide;
+
+  // Check if the brand row values look like EU sizes (30-52 range)
+  const brandRow = guide.rows[0];
+  if (!brandRow) return guide;
+
+  const euSizes = brandRow.values;
+  const looksLikeEU = euSizes.every((v) => {
+    const num = parseFloat(v);
+    return !isNaN(num) && num >= 30 && num <= 52;
+  });
+  if (!looksLikeEU) return guide;
+
+  const newRows: SizeRow[] = [brandRow];
+
+  if (!hasEU) {
+    newRows.push({ label: 'Europe', shortLabel: 'EU', values: [...euSizes] });
+  }
+
+  if (!hasUK) {
+    const ukValues = euSizes.map((eu) => EU_UK_MAP[eu] || '');
+    if (ukValues.some((v) => v !== '')) {
+      newRows.push({ label: 'Royaume-Uni', shortLabel: 'UK', values: ukValues });
+    }
+  }
+
+  if (!hasUS) {
+    const usValues = euSizes.map((eu) => EU_US_MAP[eu] || '');
+    if (usValues.some((v) => v !== '')) {
+      newRows.push({ label: 'Etats-Unis', shortLabel: 'US', values: usValues });
+    }
+  }
+
+  // Append remaining rows (cm, etc.)
+  for (let i = 1; i < guide.rows.length; i++) {
+    newRows.push(guide.rows[i]);
+  }
+
+  console.log('   Enriched size guide with EU/UK/US conversions');
+  return { ...guide, rows: newRows };
 }
 
 function getShortLabel(label: string): string {
@@ -438,7 +581,8 @@ export const genericAdapter: SiteAdapter = {
     const sizeGuides: SizeGuide[] = [];
 
     if (sizeGuide) {
-      sizeGuides.push(sizeGuide);
+      const enriched = enrichWithConversions(sizeGuide);
+      sizeGuides.push(enriched);
       products.forEach((p) => (p.sizeGuideId = 1));
       console.log('   Found size guide!');
     } else {
