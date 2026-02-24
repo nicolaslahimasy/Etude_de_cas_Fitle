@@ -315,17 +315,7 @@ async function trySizeGuidePage(url: string): Promise<SizeGuide | null> {
     if (!res || res.status() >= 400) return null;
 
     const tables = await page.locator('table').all();
-    for (const table of tables) {
-      const text = await table.textContent();
-      if (!text) continue;
-
-      const lower = text.toLowerCase();
-      if (lower.includes('eu') || lower.includes('uk') || lower.includes('us') || lower.includes('cm')) {
-        return await parseTable(table, url);
-      }
-    }
-
-    return null;
+    return await selectBestTable(tables, url);
   } catch {
     return null;
   } finally {
@@ -366,24 +356,63 @@ async function findSizeGuideOnProductPage(productUrl: string): Promise<SizeGuide
       }
     }
 
-    // Find tables with size data
+    // Find the best size conversion table among all tables
     const tables = await page.locator('table').all();
-    for (const table of tables) {
-      const text = await table.textContent();
-      if (!text) continue;
-
-      const lower = text.toLowerCase();
-      if (lower.includes('eu') || lower.includes('uk') || lower.includes('us') || lower.includes('cm') || lower.includes('pointure') || lower.includes('taille')) {
-        return await parseTable(table, productUrl);
-      }
-    }
-
-    return null;
+    return await selectBestTable(tables, productUrl);
   } catch {
     return null;
   } finally {
     await page.close();
   }
+}
+
+// Keywords that indicate a measurement/non-shoe table (should be skipped)
+const BAD_TABLE_KEYWORDS = [
+  'insole', 'girth', 'ball', 'trouser', 'belt', 'waist', 'chest',
+  'inches', 'narrow', 'medium', 'wide', 'extra-wide',
+];
+
+/** Score a table's text content for shoe size conversion relevance */
+function scoreTableText(text: string): number {
+  const lower = text.toLowerCase();
+  let score = 0;
+
+  // Positive: shoe size system labels as standalone words
+  if (/\beu\b/i.test(text)) score += 10;
+  if (/\buk\b/i.test(text)) score += 10;
+  if (/\bus\b/i.test(text)) score += 10;
+  if (lower.includes('pointure') || lower.includes('taille')) score += 5;
+  if (/\bcm\b/.test(lower) || lower.includes('longueur du pied')) score += 5;
+
+  // Negative: measurement or non-shoe tables
+  for (const kw of BAD_TABLE_KEYWORDS) {
+    if (lower.includes(kw)) score -= 15;
+  }
+  if (/\bmm\b/.test(lower)) score -= 10;
+
+  return score;
+}
+
+/** Try all tables and return the best shoe size conversion table */
+async function selectBestTable(tables: any[], url: string): Promise<SizeGuide | null> {
+  let bestGuide: SizeGuide | null = null;
+  let bestScore = -Infinity;
+
+  for (const table of tables) {
+    const text = await table.textContent();
+    if (!text) continue;
+
+    const score = scoreTableText(text);
+    if (score <= 0) continue; // Skip tables with no size system signals
+
+    const guide = await parseTable(table, url);
+    if (guide && score > bestScore) {
+      bestScore = score;
+      bestGuide = guide;
+    }
+  }
+
+  return bestGuide;
 }
 
 async function parseTable(table: any, url: string): Promise<SizeGuide | null> {
@@ -507,7 +536,17 @@ const EU_US_MAP: Record<string, string> = {
   '47': '13.5', '48': '14',
 };
 
-/** Add EU/UK/US rows when a size guide only has brand sizes + cm */
+// Reverse maps: UK → EU and UK → US (derived from the EU maps)
+const UK_EU_MAP: Record<string, string> = {};
+for (const [eu, uk] of Object.entries(EU_UK_MAP)) {
+  if (!UK_EU_MAP[uk]) UK_EU_MAP[uk] = eu; // Keep first mapping
+}
+
+function mapValues(values: string[], map: Record<string, string>): string[] {
+  return values.map((v) => map[v] || '');
+}
+
+/** Add missing EU/UK/US rows using standard conversion tables */
 function enrichWithConversions(guide: SizeGuide): SizeGuide {
   const shortLabels = guide.rows.map((r) => r.shortLabel);
   const hasEU = shortLabels.includes('EU');
@@ -516,40 +555,52 @@ function enrichWithConversions(guide: SizeGuide): SizeGuide {
 
   if (hasEU && hasUK && hasUS) return guide;
 
-  // Check if the brand row values look like EU sizes (30-52 range)
   const brandRow = guide.rows[0];
   if (!brandRow) return guide;
 
-  const euSizes = brandRow.values;
-  const looksLikeEU = euSizes.every((v) => {
-    const num = parseFloat(v);
-    return !isNaN(num) && num >= 30 && num <= 52;
-  });
-  if (!looksLikeEU) return guide;
+  const brandValues = brandRow.values;
+  const nums = brandValues.map((v) => parseFloat(v)).filter((n) => !isNaN(n));
+  if (nums.length === 0) return guide;
+
+  const avg = nums.reduce((a, b) => a + b, 0) / nums.length;
+  const looksLikeEU = avg >= 30 && avg <= 52; // EU range: 35-48
+  const looksLikeUK = avg >= 2 && avg <= 15;  // UK range: 2-14
+
+  if (!looksLikeEU && !looksLikeUK) return guide;
 
   const newRows: SizeRow[] = [brandRow];
 
-  if (!hasEU) {
-    newRows.push({ label: 'Europe', shortLabel: 'EU', values: [...euSizes] });
-  }
-
-  if (!hasUK) {
-    const ukValues = euSizes.map((eu) => EU_UK_MAP[eu] || '');
-    if (ukValues.some((v) => v !== '')) {
-      newRows.push({ label: 'Royaume-Uni', shortLabel: 'UK', values: ukValues });
+  if (looksLikeEU) {
+    // Brand values are EU sizes (e.g., Bocage, Kleman)
+    if (!hasEU) newRows.push({ label: 'Europe', shortLabel: 'EU', values: [...brandValues] });
+    if (!hasUK) {
+      const v = mapValues(brandValues, EU_UK_MAP);
+      if (v.some((x) => x)) newRows.push({ label: 'Royaume-Uni', shortLabel: 'UK', values: v });
+    }
+    if (!hasUS) {
+      const v = mapValues(brandValues, EU_US_MAP);
+      if (v.some((x) => x)) newRows.push({ label: 'Etats-Unis', shortLabel: 'US', values: v });
+    }
+  } else {
+    // Brand values are UK sizes (e.g., Meermin)
+    if (!hasUK) newRows.push({ label: 'Royaume-Uni', shortLabel: 'UK', values: [...brandValues] });
+    if (!hasEU) {
+      const v = mapValues(brandValues, UK_EU_MAP);
+      if (v.some((x) => x)) newRows.push({ label: 'Europe', shortLabel: 'EU', values: v });
+    }
+    if (!hasUS) {
+      // UK → EU → US
+      const euValues = mapValues(brandValues, UK_EU_MAP);
+      const v = mapValues(euValues, EU_US_MAP);
+      if (v.some((x) => x)) newRows.push({ label: 'Etats-Unis', shortLabel: 'US', values: v });
     }
   }
 
-  if (!hasUS) {
-    const usValues = euSizes.map((eu) => EU_US_MAP[eu] || '');
-    if (usValues.some((v) => v !== '')) {
-      newRows.push({ label: 'Etats-Unis', shortLabel: 'US', values: usValues });
-    }
-  }
-
-  // Append remaining rows (cm, etc.)
+  // Append remaining rows (existing EU/UK/US/cm, etc.)
   for (let i = 1; i < guide.rows.length; i++) {
-    newRows.push(guide.rows[i]);
+    if (!['EU', 'UK', 'US'].includes(guide.rows[i].shortLabel) || !newRows.some((r) => r.shortLabel === guide.rows[i].shortLabel)) {
+      newRows.push(guide.rows[i]);
+    }
   }
 
   console.log('   Enriched size guide with EU/UK/US conversions');
